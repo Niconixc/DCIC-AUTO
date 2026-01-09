@@ -1,4 +1,4 @@
-# 🚀 DCIC - Sistema de Automatización WMS
+#  DCIC - Sistema de Automatización WMS
 
 Sistema de automatización para el procesamiento de órdenes de trabajo en el WMS (Warehouse Management System) de DCIC.
 
@@ -6,7 +6,7 @@ Sistema de automatización para el procesamiento de órdenes de trabajo en el WM
 ![Selenium](https://img.shields.io/badge/Selenium-WebDriver-green.svg)
 ![CustomTkinter](https://img.shields.io/badge/GUI-CustomTkinter-orange.svg)
 
-## 📋 Descripción
+##  Descripción
 
 Esta aplicación automatiza el proceso completo de despacho en el sistema WMS, desde la extracción de referencias de manifiestos PDF hasta la creación de Órdenes de Trabajo (OT).
 
@@ -22,7 +22,7 @@ Esta aplicación automatiza el proceso completo de despacho en el sistema WMS, d
 | 🔴 Ripley | `243XXXXXXXX-A` | ZDESP-RIPLEY-01 |
 | 🟣 Páginas | `Nombre.cl-XXXX` | ZDESP-01-01 |
 
-## 📁 Estructura de Archivos
+##  Estructura de Archivos
 
 ```
 DCIC AUTO/
@@ -34,15 +34,15 @@ DCIC AUTO/
 └── README.txt           # Documentación legacy
 ```
 
-## ⚙️ Funcionalidades
+##  Funcionalidades
 
-### 🔍 Extracción de Referencias
+###  Extracción de Referencias
 - **Detección automática de canal** basada en el contenido del PDF
 - **Soporte para PDFs de texto** usando pdfplumber
 - **Soporte para PDFs imagen** usando OCR (Tesseract)
 - Extracción de múltiples referencias en un solo paso
 
-### 🤖 Automatización WMS
+###  Automatización WMS
 - **Login automático** al sistema WMS
 - **Navegación al Monitor de Salida**
 - **Búsqueda y selección** de órdenes por referencia
@@ -51,13 +51,13 @@ DCIC AUTO/
 - **Creación de OT** con confirmación automática
 - **Captura del número de OT** generada
 
-### 📊 Reportes
+###  Reportes
 - Log de ejecución en tiempo real con colores
 - Resumen final con estadísticas
 - Detalle de órdenes no encontradas
 - Listado de SKUs sin stock (banderas rojas)
 
-## 🛠️ Requisitos
+##  Requisitos
 
 ### Sistema
 - Windows 10/11
@@ -73,13 +73,13 @@ DCIC AUTO/
 - **Tesseract OCR**: `winget install UB-Mannheim.TesseractOCR`
 - **Poppler**: Descargar y extraer en `C:\poppler\`
 
-## 📥 Instalación
+##  Instalación
 
 1. **Clonar o descargar** el repositorio
 2. **Ejecutar** `instalar.bat` (doble clic)
 3. Esperar a que termine la instalación de dependencias
 
-## 🚀 Uso
+##  Uso
 
 1. Ejecutar `WMS_DCIC.bat` (doble clic)
 2. Seleccionar archivos PDF (manifiestos)
@@ -91,7 +91,7 @@ DCIC AUTO/
 8. Revisar el **número de OT** generada
 9. Click en **"Nuevo"** para procesar otro PDF
 
-## 🔧 Configuración
+##  Configuración
 
 ### Credenciales WMS
 Las credenciales están en `wms_dcic_gui.py`, líneas 127-128:
@@ -109,7 +109,7 @@ DELAY_SEARCH = 1.0    # Delay en búsquedas
 DELAY_PAGE = 1.5      # Delay para carga de páginas
 ```
 
-## ❓ Solución de Problemas
+##  Solución de Problemas
 
 | Error | Solución |
 |-------|----------|
@@ -119,7 +119,7 @@ DELAY_PAGE = 1.5      # Delay para carga de páginas
 | "Ubicación no encontrada" | Verificar que la ubicación exista en WMS |
 | "OT no capturada" | La OT se creó pero no se pudo leer el número |
 
-## 📦 Dependencias
+##  Dependencias
 
 ```
 customtkinter>=5.0.0
@@ -131,7 +131,7 @@ pdf2image>=1.16.0
 Pillow>=9.0.0
 ```
 
-## 🔄 Flujo del Proceso
+##  Flujo del Proceso
 
 ```
 ┌─────────────────┐
@@ -169,12 +169,12 @@ Pillow>=9.0.0
 └─────────────────┘
 ```
 
-## 📝 Versión
+##  Versión
 
 - **Versión:** 2.0
 - **Fecha:** Enero 2026
 - **Desarrollado para:** DCIC
 
-## 📄 Licencia
+##  Licencia
 
 Uso interno DCIC - Todos los derechos reservados.
