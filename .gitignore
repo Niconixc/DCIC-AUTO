@@ -38,6 +38,7 @@ Thumbs.db
 
 # Logs
 *.log
+historial_ots.csv
 
 # Chrome Driver
 chromedriver.exe

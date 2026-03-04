@@ -1,10 +1,13 @@
 """
-WMS DCIC - Interfaz Unificada v1.0
+DCIC - Interfaz Unificada v1.0
 ==================================
 Interfaz gráfica para automatización de:
 - Falabella
 - Mercadolibre Flex
 - Walmart
+- Ripley
+- Paris
+- Paginas
 
 Requiere: pip install customtkinter pdfplumber selenium webdriver-manager
 """
@@ -15,7 +18,8 @@ import re
 import time
 import threading
 import winsound
-from datetime import datetime
+import csv
+from datetime import datetime, timedelta
 from queue import Queue
 
 # Instalar dependencias si no existen
@@ -87,7 +91,7 @@ CANALES = {
     },
     "Mercadolibre": {
         "patron": r'^2000\d{12,14}$',
-        "patron_busqueda": r'\b(2000\d{12,14})\b',
+        "patron_busqueda": r'\b(2000\d{12,14})\b',  # Simplificado para detectar en manifiestos
         "ubicacion": "ZDESP-FLEXMELI-01",
         "color": "#FFE600",  # Amarillo
         "keywords": ["mercadolibre", "meli", "flex", "marketcenter", "mkc"]
@@ -107,8 +111,8 @@ CANALES = {
         "keywords": ["paris", "cencosud", "mkc", "marketcenter"]
     },
     "Ripley": {
-        "patron": r'^243\d{8}-A$',
-        "patron_busqueda": r'\b(243\d{8}-A)\b',
+        "patron": r'^24\d{9}-[A-Z]?$',
+        "patron_busqueda": r'\b(24\d{9})\b',
         "ubicacion": "ZDESP-RIPLEY-01",
         "color": "#dc3545",  # Rojo
         "keywords": ["ripley", "rpl"]
@@ -123,16 +127,53 @@ CANALES = {
     }
 }
 
+OPERADORES = ["Rafa", "Alejo", "Nicolas", "Tomas"]
+OT_AUDIT_CSV = "historial_ots.csv"
+USER_PINS = {
+    "Rafa": "9115",
+    "Alejo": "1609",
+    "Nicolas": "6020",
+    "Tomas": "1234",
+}
+USER_COLORS = {
+    "Rafa": "#111111",      # Negro
+    "Alejo": "#ff69b4",     # Rosado
+    "Nicolas": "#1e90ff",   # Azul
+    "Tomas": "#ff3b30",     # Rojo
+}
+OPERADOR_UBICACION_MAP = {
+    "Nicolas": "ZDESP-01-01",
+    "Alejo": "ZDESP-02-02",
+    "Rafa": "ZDESP-03-03",
+    "Tomas": "ZDESP-BULKYMELI-01",
+}
+
 WMS_URL = "https://checkweb-prd-checkwms.azurewebsites.net/"
 MONITOR_URL = "https://checkweb-prd-checkwms.azurewebsites.net/DocumentoDespacho/monitorsalida"
 WMS_USER = "18539597"
 WMS_PASS = "185395"
 
 WAIT_TIMEOUT = 60
-DELAY_STEP = 0.8      # Reducido de 1.5 para mayor velocidad
-DELAY_SEARCH = 1.0    # Reducido de 2.0
-DELAY_PAGE = 1.5      # Reducido de 3.0
-MAX_RETRIES = 3
+DELAY_STEP = 0.4      # Entre pasos del wizard
+DELAY_SEARCH = 0.5   # Tras escribir en búsqueda
+DELAY_PAGE = 0.8     # Tras click Siguiente (la página carga)
+MAX_RETRIES = 2
+OT_CAPTURE_TIME_TOLERANCE_SEC = 5
+OT_CAPTURE_MAX_DELAY_SEC = 180
+OT_REQUIRE_UBICACION_MATCH = True
+
+# ─── ChromeDriver precargado en background ───
+_preloaded_driver = None   # webdriver.Chrome listo para usar
+_preload_lock = threading.Lock()
+
+def preload_driver():
+    """Pre-descarga y cachea el binario de ChromeDriver en background.
+    NO abre una ventana Chrome — solo prepara el ejecutable para que
+    al presionar EJECUTAR el driver se cree instantáneamente."""
+    try:
+        ChromeDriverManager().install()  # Descarga/cachea el binario
+    except:
+        pass  # Si falla, setup_driver() lo descargará en ese momento
 
 
 # ============== EXTRACCIÓN PDF ==============
@@ -154,11 +195,11 @@ def detect_canal_from_pdf(pdf_path):
             # Paginas: Texto.cl-XXXX o Texto-XXXX (ej: Vincenzi.cl-1369, Miglu-1004)
             if re.search(r'\b[A-Za-z]+\.cl-\d+\b', text) or re.search(r'\b[A-Za-z]+-\d{3,4}\b', text):
                 # Verificar que no sea Ripley (que también tiene guión)
-                if not re.search(r'\b243\d{8}-A\b', text):
+                if not re.search(r'\b24\d{9}\b', text):
                     return "Paginas"
             
-            # Ripley: 243XXXXXXXX-A (muy específico por el -A)
-            if re.search(r'\b243\d{8}-A\b', text):
+            # Ripley: 24XXXXXXXXX (11 dígitos que empiezan con 24, con o sin guion-letra al final)
+            if re.search(r'\b24\d{9}\b', text):
                 return "Ripley"
             
             # Mercadolibre: 2000 + 12-14 dígitos
@@ -301,9 +342,13 @@ def extract_references(pdf_paths, canal):
 # ============== AUTOMATIZACIÓN WMS ==============
 
 class WMSAutomation:
-    def __init__(self, canal, log_callback=None):
+    def __init__(self, canal, log_callback=None, operador="Sin definir"):
         self.canal = canal
-        self.config = CANALES[canal]
+        self.operador = operador
+        self.config = dict(CANALES[canal])
+        ubicacion_forzada = OPERADOR_UBICACION_MAP.get(self.operador)
+        if ubicacion_forzada:
+            self.config["ubicacion"] = ubicacion_forzada
         self.driver = None
         self.wait = None
         self.orders_selected = []
@@ -316,21 +361,74 @@ class WMSAutomation:
     def log(self, message):
         self.log_callback(message)
     
-    def setup_driver(self):
+    def _create_chrome_driver(self):
+        """Crea un nuevo ChromeDriver con las opciones estándar."""
         options = Options()
         options.add_argument("--start-maximized")
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
+        options.add_experimental_option(
+            "excludeSwitches", ["enable-logging", "enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
-        
         service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=options)
+        drv = webdriver.Chrome(service=service, options=options)
+        drv.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        return drv
+
+    def setup_driver(self):
+        global _preloaded_driver
+        # El preload ahora solo cachea el binario, no abre Chrome
+        # Por lo tanto, _preloaded_driver siempre será None — creamos directo
+        # (Dejo la lógica por si en el futuro se reutiliza)
+        preloaded = None
+        with _preload_lock:
+            preloaded = _preloaded_driver
+            _preloaded_driver = None
+
+        if preloaded is not None:
+            # Verificar que el driver precargado sigue vivo (ping)
+            try:
+                _ = preloaded.current_url  # Lanza excepción si está muerto
+                self.driver = preloaded
+                self.log("  ⚡ ChromeDriver precargado utilizado")
+            except Exception:
+                self.log("  (Driver precargado invalido, creando nuevo...)")
+                try:
+                    preloaded.quit()
+                except:
+                    pass
+                preloaded = None
+
+        if preloaded is None:
+            self.driver = self._create_chrome_driver()
+
         self.wait = WebDriverWait(self.driver, WAIT_TIMEOUT)
-        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     
+    def dismiss_alerts(self):
+        """Cierra cualquier alert/confirm/prompt JS inesperado."""
+        try:
+            alert = self.driver.switch_to.alert
+            alert.dismiss()  # Equivale a cancelar/cerrar el popup
+        except:
+            pass  # No había alert, todo bien
+
     def js_click(self, element):
+        self.dismiss_alerts()  # Limpiar popups antes de hacer click
         self.driver.execute_script("arguments[0].click();", element)
+        self.dismiss_alerts()  # Limpiar popups que el click pudo haber generado
+
+    def is_session_alive(self):
+        """Verifica que la sesión del WMS sigue activa. Si expiró, hace re-login."""
+        try:
+            body = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+            # El WMS redirige al login cuando expira la sesión
+            if "ingresar" in body and "contraseña" in body:
+                self.log("  ⚠️ Sesión expirada, reintentando login...")
+                return self.login()
+            return True
+        except:
+            return False
     
     def login(self):
         self.log(f"Navegando a {WMS_URL}")
@@ -535,7 +633,7 @@ class WMSAutomation:
                 search_box.click()
                 search_box.send_keys(Keys.CONTROL + "a")
                 search_box.send_keys(Keys.DELETE)
-                time.sleep(1)
+                time.sleep(0.3)
                 self.wait_for_search_results()
         except:
             pass
@@ -566,8 +664,8 @@ class WMSAutomation:
         """Verifica errores de stock y captura los SKUs afectados."""
         has_errors = False
         try:
-            # Esperar un momento para que la tabla cargue completamente
-            time.sleep(1)
+            # Breve espera para que la tabla cargue
+            time.sleep(0.3)
             
             # Obtener todas las filas de la tabla
             rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
@@ -692,14 +790,52 @@ class WMSAutomation:
         return False
     
     def click_crear_ot(self):
-        for selector in ["//button[contains(text(), 'Crear OT')]", "//button[contains(text(), 'CREAR OT')]"]:
+        """Hace clic en el botón 'Crear OT' del Paso 5 del wizard.
+        Busca con múltiples estrategias y hace scroll para asegurar que esté visible."""
+        # Selectores XPATH — el text puede variar por resolución / locale
+        selectors = [
+            "//button[contains(text(), 'Crear OT')]",
+            "//button[contains(text(), 'CREAR OT')]",
+            "//button[contains(text(), 'crear ot')]",
+            "//button[contains(text(), 'Generar OT')]",
+            "//button[contains(text(), 'GENERAR OT')]",
+        ]
+
+        for selector in selectors:
             try:
                 btn = self.driver.find_element(By.XPATH, selector)
-                if btn.is_displayed():
-                    self.js_click(btn)
-                    return True
+                # Scroll al botón para asegurar que esté en pantalla
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", btn)
+                time.sleep(0.3)
+                try:
+                    btn.click()  # Clic nativo primero
+                except:
+                    self.js_click(btn)  # Fallback JS
+                self.log("  Clic en 'Crear OT' OK")
+                return True
             except:
                 continue
+
+        # Fallback: buscar entre todos los botones visibles
+        try:
+            for btn in self.driver.find_elements(By.TAG_NAME, "button"):
+                txt = btn.text.strip().lower()
+                if ("crear" in txt and "ot" in txt) or ("generar" in txt and "ot" in txt):
+                    if btn.is_displayed():
+                        self.driver.execute_script(
+                            "arguments[0].scrollIntoView({block: 'center'});", btn)
+                        time.sleep(0.3)
+                        try:
+                            btn.click()
+                        except:
+                            self.js_click(btn)
+                        self.log(f"  Clic en botón '{btn.text.strip()}' OK (fallback)")
+                        return True
+        except:
+            pass
+
+        self.log("  ⚠️ Botón 'Crear OT' no encontrado")
         return False
     
     def confirm_modal(self):
@@ -753,122 +889,90 @@ class WMSAutomation:
         self.log("  Siguiente paso...")
         self.click_next()
         time.sleep(DELAY_PAGE)
-        # PASO 2 - Seleccionar ubicación usando CTRL+F del navegador
+
+        # PASO 2 - Seleccionar ubicación
         self.log(f"[2/5] Ubicación: {ubicacion}")
         ubicacion_found = False
-        
-        # Esperar a que la tabla cargue
-        time.sleep(1)  # Reducido de 2
-        
-        # MÉTODO 1: Usar CTRL+F del navegador para buscar y hacer scroll
+
+        # Esperar que la tabla de ubicaciones cargue (máx 10s)
+        deadline_ubi = time.time() + 10
+        while time.time() < deadline_ubi:
+            try:
+                rows_ubi = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                rows_vis = [r for r in rows_ubi if r.is_displayed() and r.text.strip()
+                            and "Cargando" not in r.text]
+                if len(rows_vis) > 0:
+                    break
+            except:
+                pass
+            time.sleep(0.4)
+
+        # Intentar ampliar paginación de ubicaciones (puede haber muchas)
         try:
-            from selenium.webdriver.common.action_chains import ActionChains
-            
-            # Abrir búsqueda del navegador con CTRL+F
-            body = self.driver.find_element(By.TAG_NAME, "body")
-            body.send_keys(Keys.CONTROL + "f")
-            time.sleep(0.3)  # Reducido de 0.5
-            
-            # Escribir la ubicación en la búsqueda
-            actions = ActionChains(self.driver)
-            actions.send_keys(ubicacion)
-            actions.perform()
-            time.sleep(0.5)  # Reducido de 1
-            
-            # Presionar Enter para ir al resultado
-            actions = ActionChains(self.driver)
-            actions.send_keys(Keys.ENTER)
-            actions.perform()
-            time.sleep(0.3)  # Reducido de 0.5
-            
-            # Cerrar la búsqueda con Escape
-            actions = ActionChains(self.driver)
-            actions.send_keys(Keys.ESCAPE)
-            actions.perform()
-            time.sleep(0.3)  # Reducido de 0.5
-            
-            self.log(f"  Buscando con CTRL+F...")
-        except Exception as e:
-            self.log(f"  Error en CTRL+F: {e}")
-        
-        # Ahora buscar y seleccionar el radio button de la ubicación
-        time.sleep(0.5)  # Reducido de 1
-        
-        # Buscar la fila que contiene la ubicación
-        try:
-            rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-            for row in rows:
+            from selenium.webdriver.support.ui import Select as _Sel
+            for _val in ["-1", "100", "50"]:
                 try:
-                    if ubicacion in row.text:
-                        # Hacer scroll adicional para asegurarse
-                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", row)
-                        time.sleep(0.2)  # Reducido de 0.3
-                        
-                        # Buscar el radio button
-                        radios = row.find_elements(By.CSS_SELECTOR, "input[type='radio']")
-                        if radios:
-                            self.js_click(radios[0])
-                            self.log(f"  {ubicacion} OK")
-                            ubicacion_found = True
-                            break
+                    _sel_el = self.driver.find_element(
+                        By.CSS_SELECTOR,
+                        "select[name*='DataTables'], .dataTables_length select, select[name$='_length']"
+                    )
+                    _Sel(_sel_el).select_by_value(_val)
+                    time.sleep(0.8)
+                    break
                 except:
                     continue
         except:
             pass
-        
-        # MÉTODO 2: Si aún no encontró, usar JavaScript para buscar en toda la página
-        if not ubicacion_found:
+
+        # MÉTODO 1: JavaScript — busca y clica el radio en todas las filas
+        for _intento in range(3):
             try:
-                # Buscar el elemento que contiene el texto
                 script = f"""
                     var elements = document.querySelectorAll('table tbody tr');
                     for (var i = 0; i < elements.length; i++) {{
                         if (elements[i].textContent.includes('{ubicacion}')) {{
                             elements[i].scrollIntoView({{block: 'center'}});
                             var radio = elements[i].querySelector('input[type="radio"]');
-                            if (radio) {{
-                                radio.click();
-                                return true;
-                            }}
+                            if (radio) {{ radio.click(); return true; }}
                         }}
                     }}
                     return false;
                 """
                 result = self.driver.execute_script(script)
                 if result:
-                    self.log(f"  {ubicacion} OK (JavaScript)")
+                    self.log(f"  {ubicacion} OK")
                     ubicacion_found = True
+                    break
             except:
                 pass
-        
-        # MÉTODO 3: Último intento - scroll completo hacia abajo y buscar
+            time.sleep(0.5)
+
+        # MÉTODO 2: Fallback Python con scroll
         if not ubicacion_found:
             try:
-                # Scroll hasta el final de la página
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1)
-                
+                time.sleep(0.4)
                 rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
                 for row in rows:
                     try:
                         if ubicacion in row.text:
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", row)
-                            time.sleep(0.3)
+                            self.driver.execute_script(
+                                "arguments[0].scrollIntoView({block: 'center'});", row)
                             radios = row.find_elements(By.CSS_SELECTOR, "input[type='radio']")
                             if radios:
                                 self.js_click(radios[0])
-                                self.log(f"  {ubicacion} OK (scroll final)")
+                                self.log(f"  {ubicacion} OK (fallback)")
                                 ubicacion_found = True
                                 break
                     except:
                         continue
             except:
                 pass
-        
+
         if not ubicacion_found:
             self.log(f"  ⚠️ ADVERTENCIA: {ubicacion} no encontrada")
-            self.log(f"  Intentando continuar de todos modos...")
-        
+            self.log("  Intentando continuar de todos modos...")
+
         time.sleep(DELAY_STEP)
         self.click_next()
         time.sleep(DELAY_PAGE)
@@ -916,173 +1020,693 @@ class WMSAutomation:
         self.log("[5/5] Creando OT...")
         self.mark_picking_consolidado()
         time.sleep(DELAY_STEP)
+        
+        # Guardar la hora ANTES de crear la OT (para identificarla luego por timestamp)
+        tiempo_antes_crear = datetime.now()
+        self.log(f"  Hora de creación registrada: {tiempo_antes_crear.strftime('%Y-%m-%dT%H:%M:%S')}")
+        
         self.click_crear_ot()
         time.sleep(1.5)
         self.confirm_modal()
-        time.sleep(DELAY_PAGE)
-        
-        # Capturar número de OT generada
-        ot_number = self.capture_ot_number()
-        
+        self.dismiss_alerts()  # Limpiar cualquier popup/alert del modal
+
+        # ── Polling inteligente: esperar hasta 15s a que la OT quede guardada ──
+        # En vez de un sleep fijo, verificamos cada 0.5s si la página
+        # ya no muestra el wizard de creación (señal de que el servidor confirmó)
+        self.log("  Esperando confirmación del servidor...")
+        _dl_modal = time.time() + 15
+        while time.time() < _dl_modal:
+            try:
+                self.dismiss_alerts()
+                # Si el wizard desapareció (ya no hay botón Siguiente visible)
+                # es porque el WMS guardó la OT y cambió de vista
+                btns = self.driver.find_elements(By.XPATH, "//button[contains(text(),'Siguiente')]")
+                btns_vis = [b for b in btns if b.is_displayed()]
+                if not btns_vis:
+                    self.log("  ✅ Confirmed: wizard cerrado")
+                    break
+            except:
+                pass
+            time.sleep(0.5)
+        else:
+            self.log("  (Timeout wizard — continuando de todas formas)")
+        # ── NIVEL 1: Intentar capturar OT desde la página actual (más rápido y confiable) ──
+        ot_number = self.capture_ot_from_current_page(tiempo_antes_crear)
+
+        if ot_number:
+            self.log(f"\n🎉 ¡OT CREADA EXITOSAMENTE!")
+            self.log(f"📋 Número de OT: {ot_number}")
+            self.ot_generada = ot_number
+            return True
+
+        # ── NIVEL 2: Fallback — buscar en lista de OTs ──
+        self.log("  (OT no encontrada en página actual, buscando en lista...)")
+        ot_number = self.capture_ot_number(tiempo_antes_crear)
+
         if ot_number:
             self.log(f"\n🎉 ¡OT CREADA EXITOSAMENTE!")
             self.log(f"📋 Número de OT: {ot_number}")
             self.ot_generada = ot_number
         else:
             self.log("\n¡OT CREADA EXITOSAMENTE!")
-        
+
         return True
+
+    def capture_ot_from_current_page(self, tiempo_antes_crear=None):
+        """
+        Intenta leer el número de OT (PCKM...) directamente desde la página actual.
+        Si se proporciona tiempo_antes_crear, filtra los códigos cuya fecha
+        visible en la página sea >= ese momento (evita capturar OTs antiguas).
+        """
+        time.sleep(1.5)
+
+        def parse_ts(ts_str):
+            return self._parse_wms_timestamp(ts_str)
+
+        # ── Estrategia 1: URL contiene el código ──
+        try:
+            m = re.search(r'(PCKM\d{6,15})', self.driver.current_url, re.IGNORECASE)
+            if m:
+                ot_code = m.group(1).upper()
+                self.log(f"  ⚡ OT capturada desde URL: {ot_code}")
+                return ot_code
+        except:
+            pass
+
+        # ── Estrategia 2: Filas de tabla — buscar PCKM + timestamp y comparar fecha ──
+        try:
+            rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+            candidatas = []
+            for row in rows:
+                try:
+                    if not row.is_displayed():
+                        continue
+                    row_text = row.text
+                    m_ot = re.search(r'(PCKM\d{6,15})', row_text, re.IGNORECASE)
+                    if not m_ot:
+                        continue
+                    ot_code = m_ot.group(1).upper()
+                    row_upper = row_text.upper()
+                    creada_ok = "CREADA" in row_upper
+                    ubicacion_ok = self.config["ubicacion"] in row_text
+
+                    # Buscar timestamp en el texto de la fila (ej: 2026-02-27T10:14:08.17)
+                    m_ts = re.search(
+                        r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)', row_text)
+                    fecha_dt = parse_ts(m_ts.group(1)) if m_ts else None
+                    hora_str = m_ts.group(1) if m_ts else "sin fecha"
+
+                    # Si tenemos tiempo_antes_crear, solo aceptar OTs creadas después
+                    if tiempo_antes_crear and fecha_dt:
+                        if fecha_dt < tiempo_antes_crear:
+                            continue  # OT demasiado antigua, ignorar
+
+                    num_match = re.search(r'PCKM0*(\d+)', ot_code)
+                    ot_num = int(num_match.group(1)) if num_match else 0
+                    candidatas.append({'codigo': ot_code, 'numero': ot_num,
+                                       'hora_str': hora_str, 'fecha_dt': fecha_dt,
+                                       'creada_ok': creada_ok, 'ubicacion_ok': ubicacion_ok})
+                    self.log(f"    ⚡ Candidata (tabla actual): {ot_code} | {hora_str}")
+                except:
+                    continue
+
+            if candidatas:
+                elegida = self._pick_ot_candidate(
+                    candidatas, tiempo_antes_crear, self.config["ubicacion"]
+                )
+                if elegida is None:
+                    self.log("  (No hay candidata confiable por tiempo en tabla actual)")
+                    return None
+                self.log(f"  ⚡ OT capturada desde tabla actual: {elegida['codigo']} | {elegida['hora_str']}")
+                return elegida['codigo']
+        except:
+            pass
+
+        # ── Estrategia 3: Body completo — buscar PCKM + timestamp más reciente ──
+        try:
+            page_text = self.driver.find_element(By.TAG_NAME, "body").text
+            # Encontrar todos los pares (PCKM, timestamp) en el texto
+            pckm_positions = [(m.group(1).upper(), m.start())
+                              for m in re.finditer(r'(PCKM\d{6,15})', page_text, re.IGNORECASE)]
+            ts_positions = [(m.group(1), m.start())
+                            for m in re.finditer(
+                                r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)',
+                                page_text)]
+
+            candidatas_body = []
+            for ot_code, ot_pos in pckm_positions:
+                # Buscar el timestamp más cercano al PCKM (dentro de 300 caracteres)
+                fecha_dt = None
+                hora_str = "sin fecha"
+                for ts_str, ts_pos in ts_positions:
+                    if abs(ts_pos - ot_pos) < 300:
+                        fecha_dt = parse_ts(ts_str)
+                        hora_str = ts_str
+                        break
+
+                if tiempo_antes_crear and fecha_dt and fecha_dt < tiempo_antes_crear:
+                    continue  # OT antigua, ignorar
+
+                num_match = re.search(r'PCKM0*(\d+)', ot_code)
+                ot_num = int(num_match.group(1)) if num_match else 0
+                candidatas_body.append({'codigo': ot_code, 'numero': ot_num,
+                                        'hora_str': hora_str, 'fecha_dt': fecha_dt,
+                                        'creada_ok': True, 'ubicacion_ok': False})
+
+            if candidatas_body:
+                elegida = self._pick_ot_candidate(
+                    candidatas_body, tiempo_antes_crear, self.config["ubicacion"]
+                )
+                if elegida is None:
+                    self.log("  (No hay candidata confiable por tiempo en body)")
+                    return None
+                self.log(f"  ⚡ OT capturada desde body: {elegida['codigo']} | {elegida['hora_str']}")
+                return elegida['codigo']
+        except:
+            pass
+
+        # ── Estrategia 4: Notificaciones / toasts / modales ──
+        try:
+            for sel in [".alert", ".toast", ".swal2-content", ".swal2-html-container",
+                        "[class*='success']", ".modal-body", ".modal-content"]:
+                try:
+                    for el in self.driver.find_elements(By.CSS_SELECTOR, sel):
+                        if not el.is_displayed():
+                            continue
+                        m = re.search(r'(PCKM\d{6,15})', el.text, re.IGNORECASE)
+                        if m:
+                            ot_code = m.group(1).upper()
+                            self.log(f"  ⚡ OT capturada desde notificación ({sel}): {ot_code}")
+                            return ot_code
+                except:
+                    continue
+        except:
+            pass
+
+        return None  # No encontrado — se usará el fallback capture_ot_number()
+
+    def _parse_wms_timestamp(self, ts_str):
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(ts_str, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _pick_ot_candidate(self, candidates, tiempo_antes_crear=None, ubicacion=None):
+        """Elige candidata más confiable: cercana al momento de creación y priorizando ubicación/estado."""
+        if not candidates:
+            return None
+
+        if not tiempo_antes_crear:
+            return sorted(candidates, key=lambda x: x.get('numero', 0), reverse=True)[0]
+
+        tolerance = timedelta(seconds=OT_CAPTURE_TIME_TOLERANCE_SEC)
+        max_delay = timedelta(seconds=OT_CAPTURE_MAX_DELAY_SEC)
+        recientes = []
+
+        for c in candidates:
+            fecha_dt = c.get('fecha_dt')
+            if fecha_dt is None:
+                continue
+            delta = fecha_dt - tiempo_antes_crear
+            if delta < -tolerance or delta > max_delay:
+                continue
+            c_copy = dict(c)
+            c_copy['_delta_seconds'] = delta.total_seconds()
+            recientes.append(c_copy)
+
+        if not recientes:
+            return None
+
+        if ubicacion:
+            por_ubicacion = [c for c in recientes if c.get('ubicacion_ok')]
+            if OT_REQUIRE_UBICACION_MATCH:
+                if not por_ubicacion:
+                    return None
+                recientes = por_ubicacion
+            elif por_ubicacion:
+                recientes = por_ubicacion
+
+        por_estado = [c for c in recientes if c.get('creada_ok', True)]
+        if por_estado:
+            recientes = por_estado
+
+        recientes.sort(
+            key=lambda x: (
+                0 if x['_delta_seconds'] >= 0 else 1,
+                abs(x['_delta_seconds']),
+                -x.get('numero', 0),
+            )
+        )
+        return recientes[0]
     
-    def capture_ot_number(self):
-        """Captura el número de OT navegando al listado de Órdenes de Trabajo."""
+    def capture_ot_number(self, tiempo_antes_crear=None):
+        """
+        Captura el número de OT navegando al listado de Órdenes de Trabajo.
+        Si se proporciona 'tiempo_antes_crear', busca la OT cuya fecha de creación
+        sea >= ese momento (la OT que acabamos de crear).
+        """
         ot_number = None
         ubicacion = self.config["ubicacion"]
-        
+
         try:
-            self.log(f"  Buscando OT con ubicación: {ubicacion}")
-            
-            # Navegar al listado de Órdenes de Trabajo (URL correcta con /index)
+            self.log(f"  Buscando OT para ubicación: '{ubicacion}'")
+
+            # Navegar al listado de Órdenes de Trabajo
             ot_url = "https://checkweb-prd-checkwms.azurewebsites.net/OrdenTrabajo/index"
             self.driver.get(ot_url)
-            time.sleep(3)
-            
-            # Hacer doble refresh para asegurar datos actualizados
-            self.driver.refresh()
-            time.sleep(2)
-            self.driver.refresh()
-            time.sleep(4)  # Esperar más después del segundo refresh
-            
-            # Esperar a que cargue la tabla (que no diga "0 to 0 of 0")
-            for _ in range(20):  # Intentar hasta 20 veces
+
+            # ── Esperar que la tabla cargue con filas reales (máx 20s) ──
+            deadline = time.time() + 20
+            while time.time() < deadline:
                 try:
-                    # Verificar si hay datos en la tabla
-                    info_text = self.driver.find_element(By.CSS_SELECTOR, ".dataTables_info, [class*='info']").text
-                    if "0 to 0" not in info_text and "0 of 0" not in info_text:
+                    rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                    visible = [r for r in rows if r.is_displayed() and r.text.strip()
+                               and "Cargando" not in r.text
+                               and "Sin información" not in r.text]
+                    if len(visible) > 0:
                         break
                 except:
                     pass
-                time.sleep(1)
-            
-            time.sleep(3)  # Espera adicional para asegurar datos completos
-            
-            # USAR BÚSQUEDA RÁPIDA para filtrar por ubicación
+                time.sleep(0.5)
+            else:
+                self.log("  ⚠️ La tabla de OTs tardó demasiado en cargar.")
+
+            self.log("  Tabla de OTs cargada.")
+
+            # ── PASO 1: Ampliar paginación a 100 registros para ver más OTs ──
             try:
-                search_selectors = [
-                    "input[type='search']",
-                    ".dataTables_filter input",
-                    "[aria-label*='Búsqueda']",
-                    "input[placeholder*='Búsqueda']"
-                ]
-                
-                search_input = None
-                for selector in search_selectors:
+                from selenium.webdriver.support.ui import Select as SeleniumSelect
+                for sel_val in ["100", "50", "25"]:
                     try:
-                        inputs = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                        for inp in inputs:
-                            if inp.is_displayed():
-                                search_input = inp
-                                break
-                        if search_input:
-                            break
+                        sel_el = self.driver.find_element(
+                            By.CSS_SELECTOR,
+                            "select[name*='DataTables'], .dataTables_length select, select[name$='_length']"
+                        )
+                        SeleniumSelect(sel_el).select_by_value(sel_val)
+                        time.sleep(1.5)
+                        self.log(f"  Paginación ampliada a {sel_val} registros.")
+                        break
                     except:
                         continue
-                
-                if search_input:
-                    # Limpiar y escribir ubicación en búsqueda rápida
-                    search_input.clear()
-                    search_input.send_keys(ubicacion)
-                    time.sleep(2)  # Esperar que filtre
-                    self.log(f"  Filtrando por: {ubicacion}")
-            except Exception as e:
-                self.log(f"  (Búsqueda rápida no disponible)")
-            
-            # Esperar un poco más para asegurar que la tabla esté cargada
-            time.sleep(2)
-            
-            # Ahora buscar en las filas
-            rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-            self.log(f"  Revisando {len(rows)} OTs...")
-            
-            # Obtener hora actual para comparar
-            hora_actual = datetime.now()
-            
-            # Buscar todas las OTs con estado CREADA y nuestra ubicación
-            ots_candidatas = []
-            
-            for row in rows[:20]:  # Revisar más filas
+            except:
+                pass
+
+            # ── PASO 2: Filtrar la tabla por FECHA+HORA de creación de la OT ──
+            # En vez de filtrar por ubicación (que puede no coincdir), usamos la
+            # fecha y hora exacta registrada antes de crear la OT.
+            # El WMS muestra la fecha debajo de "Estado Actual" en formato ISO.
+            search_input = None
+
+            dt_selectors = [
+                "input[type='search']",
+                ".dataTables_filter input",
+                "input[aria-label*='Search']",
+                "input[aria-label*='Búsqueda']",
+                "input[aria-label*='busqueda']",
+                ".dataTables_filter input[type='text']",
+            ]
+            for selector in dt_selectors:
                 try:
-                    row_text = row.text
-                    
-                    # Debug: mostrar primeras filas
-                    if len(ots_candidatas) == 0 and rows.index(row) < 3:
-                        self.log(f"    Fila {rows.index(row)+1}: {row_text[:80]}...")
-                    
-                    # Verificar que tenga nuestra ubicación, estado CREADA y código PCKM
-                    # Ser más flexible: CREADA puede aparecer como texto
-                    tiene_ubicacion = ubicacion in row_text
-                    tiene_creada = "CREADA" in row_text.upper()
-                    tiene_pckm = "PCKM" in row_text
-                    
-                    if tiene_ubicacion and tiene_creada and tiene_pckm:
-                        # Extraer el código PCKM
-                        match_ot = re.search(r'(PCKM\d{9,12})', row_text)
-                        # Extraer la hora de creación (formato: 2026-01-08T14:01:33.857)
-                        match_hora = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})', row_text)
-                        
-                        if match_ot:
-                            ot_code = match_ot.group(1)
-                            hora_creacion = None
-                            
-                            if match_hora:
-                                try:
-                                    hora_creacion = datetime.strptime(match_hora.group(1), "%Y-%m-%dT%H:%M:%S")
-                                except:
-                                    pass
-                            
-                            ots_candidatas.append({
-                                'codigo': ot_code,
-                                'hora': hora_creacion,
-                                'texto': row_text[:50]
-                            })
+                    inputs = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    for inp in inputs:
+                        if inp.is_displayed() and inp.is_enabled():
+                            search_input = inp
+                            break
+                    if search_input:
+                        break
                 except:
                     continue
-            
-            # Si hay candidatas, tomar la de número más alto (más reciente)
-            if ots_candidatas:
-                self.log(f"  Encontradas {len(ots_candidatas)} OTs con ubicación correcta")
-                
-                # Ordenar por número de OT (el más alto es el más reciente)
-                # Extraer solo los números del código PCKM para comparar
-                for ot in ots_candidatas:
+
+            def _find_search_input():
+                for _selector in dt_selectors:
                     try:
-                        # Extraer número del código (ej: PCKM000098424 -> 98424)
-                        num_match = re.search(r'PCKM0*(\d+)', ot['codigo'])
-                        if num_match:
-                            ot['numero'] = int(num_match.group(1))
-                        else:
-                            ot['numero'] = 0
+                        _inputs = self.driver.find_elements(By.CSS_SELECTOR, _selector)
+                        for _inp in _inputs:
+                            if _inp.is_displayed() and _inp.is_enabled():
+                                return _inp
                     except:
-                        ot['numero'] = 0
-                
-                # Ordenar por número (más alto primero)
-                ots_candidatas.sort(key=lambda x: x['numero'], reverse=True)
-                
-                ot_number = ots_candidatas[0]['codigo']
-                self.log(f"  ✅ OT más reciente (número más alto): {ot_number}")
-            
-            # Si no encontró ninguna
-            if not ot_number:
-                self.log("  ⚠️ No se encontró OT con esa ubicación")
-                        
+                        continue
+                return None
+
+            def _wait_table_rows(timeout_sec=10):
+                _deadline = time.time() + timeout_sec
+                while time.time() < _deadline:
+                    try:
+                        _rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                        _visible = [r for r in _rows if r.is_displayed() and r.text.strip() and "Cargando" not in r.text]
+                        if len(_visible) > 0:
+                            return True
+                    except:
+                        pass
+                    time.sleep(0.4)
+                return False
+
+            def _apply_filter_and_count(_search_input, _filtro_texto, timeout_sec=8):
+                try:
+                    _search_input.click()
+                    time.sleep(0.2)
+                    _search_input.send_keys(Keys.CONTROL + "a")
+                    _search_input.send_keys(Keys.DELETE)
+                    time.sleep(0.2)
+                    _search_input.send_keys(_filtro_texto)
+                    time.sleep(1.0)
+                except Exception:
+                    return 0
+
+                _deadline2 = time.time() + timeout_sec
+                _last_count = 0
+                while time.time() < _deadline2:
+                    try:
+                        _filas = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                        _filas_ok = [r for r in _filas if r.is_displayed() and _filtro_texto in r.text]
+                        _last_count = len(_filas_ok)
+                        if _last_count > 0:
+                            return _last_count
+                    except:
+                        pass
+                    time.sleep(0.5)
+                return _last_count
+
+            if search_input:
+                try:
+                    filtro_exitoso = False
+
+                    if tiempo_antes_crear:
+                        filtros_fecha = []
+                        for dt in [tiempo_antes_crear,
+                                   tiempo_antes_crear + timedelta(minutes=1),
+                                   tiempo_antes_crear - timedelta(minutes=1)]:
+                            ftxt = dt.strftime("%Y-%m-%dT%H:%M")
+                            if ftxt not in filtros_fecha:
+                                filtros_fecha.append(ftxt)
+
+                        for intento in range(3):
+                            if intento > 0:
+                                self.log(f"  (Fecha sin resultados aún, reintento {intento+1}/3 con refresh)")
+                                self.driver.refresh()
+                                _wait_table_rows(timeout_sec=12)
+                                try:
+                                    from selenium.webdriver.support.ui import Select as SeleniumSelect
+                                    sel_el = self.driver.find_element(
+                                        By.CSS_SELECTOR,
+                                        "select[name*='DataTables'], .dataTables_length select, select[name$='_length']"
+                                    )
+                                    for sel_val in ["100", "50", "25"]:
+                                        try:
+                                            SeleniumSelect(sel_el).select_by_value(sel_val)
+                                            time.sleep(1.0)
+                                            break
+                                        except:
+                                            continue
+                                except:
+                                    pass
+                                search_input = _find_search_input()
+                                if not search_input:
+                                    break
+
+                            for filtro_texto in filtros_fecha:
+                                self.log(f"  Filtrando DataTable por fecha/hora: '{filtro_texto}'")
+                                n = _apply_filter_and_count(search_input, filtro_texto, timeout_sec=7)
+                                if n > 0:
+                                    self.log(f"  Filtrado OK — {n} fila(s) con '{filtro_texto}'.")
+                                    filtro_exitoso = True
+                                    break
+                            if filtro_exitoso:
+                                break
+
+                    if not filtro_exitoso:
+                        self.log(f"  Filtrando DataTable por ubicación: '{ubicacion}'")
+                        n_ubi = _apply_filter_and_count(search_input, ubicacion, timeout_sec=8)
+                        if n_ubi > 0:
+                            self.log(f"  Filtrado OK — {n_ubi} fila(s) con '{ubicacion}'.")
+                        else:
+                            self.log("  (Filtro por ubicación sin resultados inmediatos; se escanearán filas visibles)")
+                except Exception as e_search:
+                    self.log(f"  (Error al filtrar: {e_search})")
+            else:
+                self.log("  ⚠️ No se encontró buscador de tabla; se escanea toda la tabla.")
+
+            time.sleep(0.3)
+
+
+            # ── PASO 3: Leer TODAS las filas visibles (excluir 'Sin información') ──
+            rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+            visible_rows = [
+                r for r in rows
+                if r.is_displayed()
+                and r.text.strip()
+                and "Cargando" not in r.text
+                and "Sin información" not in r.text
+            ]
+            self.log(f"  Filas visibles: {len(visible_rows)}")
+
+            # ── PASO 4: Debug — mostrar primeras 5 filas ──
+            for i, row in enumerate(visible_rows[:5]):
+                try:
+                    texto_debug = row.text[:150].replace('\n', ' | ')
+                    self.log(f"    [Fila {i+1}]: {texto_debug}")
+                except:
+                    pass
+
+            # ── PASO 5: Evaluar candidatas ──
+            ots_candidatas = []
+
+            for row in visible_rows:
+                try:
+                    row_text = row.text
+
+                    # CRITERIO 1: Código OT tipo PCKM (obligatorio)
+                    match_ot = re.search(r'(PCKM\d{6,15})', row_text)
+                    if not match_ot:
+                        continue
+
+                    # CRITERIO 2: Timestamp de la fila (columna Estado Actual)
+                    # La fecha aparece debajo del estado, ej: 2026-02-27T10:14:08.17
+                    match_hora = re.search(
+                        r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)', row_text
+                    )
+                    hora_str = match_hora.group(1) if match_hora else "sin fecha"
+
+                    fecha_dt = self._parse_wms_timestamp(match_hora.group(1)) if match_hora else None
+
+                    # Si tenemos tiempo_antes_crear, SOLO aceptar OTs creadas después
+                    # Esta es la comparación principal — la ubicación y estado son secundarios
+                    if tiempo_antes_crear and fecha_dt:
+                        if fecha_dt < tiempo_antes_crear:
+                            continue  # OT demasiado antigua, saltar
+
+                    ot_code = match_ot.group(1)
+                    num_match = re.search(r'PCKM0*(\d+)', ot_code)
+                    ot_num = int(num_match.group(1)) if num_match else 0
+                    row_upper = row_text.upper()
+
+                    self.log(f"    ✅ Candidata: {ot_code} | Fecha: {hora_str}")
+                    ots_candidatas.append({
+                        'codigo': ot_code,
+                        'numero': ot_num,
+                        'hora_str': hora_str,
+                        'fecha_dt': fecha_dt,
+                        'creada_ok': "CREADA" in row_upper,
+                        'ubicacion_ok': ubicacion in row_text,
+                    })
+                except Exception as ex:
+                    self.log(f"    (Error procesando fila: {ex})")
+                    continue
+
+            # ── PASO 6: Elegir la OT correcta ──
+            if ots_candidatas:
+                self.log(f"  Total candidatas: {len(ots_candidatas)}")
+
+                elegida = None
+
+                elegida = self._pick_ot_candidate(
+                    ots_candidatas, tiempo_antes_crear, ubicacion
+                )
+                if elegida:
+                    self.log(f"  ✅ OT elegida: {elegida['codigo']} | {elegida['hora_str']}")
+                else:
+                    self.log("  (Sin candidata confiable dentro de la ventana de tiempo)")
+
+                if elegida:
+                    ot_number = elegida['codigo']
+
+            else:
+                self.log(f"  ⚠️ No se encontró ninguna OT con CREADA + ubicación '{ubicacion}'.")
+                self.log("  Esperando 3s y reintentando (la OT puede tardar en aparecer)...")
+                time.sleep(3)
+
+                # Refresh y re-filtrar
+                self.driver.refresh()
+                time.sleep(3)
+
+                # Re-ampliar paginación
+                try:
+                    from selenium.webdriver.support.ui import Select as _SelR
+                    for _v in ["100", "50"]:
+                        try:
+                            _el = self.driver.find_element(
+                                By.CSS_SELECTOR,
+                                "select[name*='DataTables'], .dataTables_length select, select[name$='_length']"
+                            )
+                            _SelR(_el).select_by_value(_v)
+                            time.sleep(1)
+                            break
+                        except:
+                            continue
+                except:
+                    pass
+
+                # Re-filtrar por ubicación
+                try:
+                    _inp = None
+                    for _sel in ["input[type='search']", ".dataTables_filter input"]:
+                        try:
+                            _inputs = self.driver.find_elements(By.CSS_SELECTOR, _sel)
+                            for _i in _inputs:
+                                if _i.is_displayed() and _i.is_enabled():
+                                    _inp = _i
+                                    break
+                            if _inp:
+                                break
+                        except:
+                            continue
+                    if _inp:
+                        _inp.click()
+                        _inp.send_keys(Keys.CONTROL + "a")
+                        _inp.send_keys(Keys.DELETE)
+                        _inp.send_keys(ubicacion)
+                        time.sleep(2)
+                except:
+                    pass
+
+                # Re-evaluar filas
+                _rows2 = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                _vis2 = [r for r in _rows2
+                         if r.is_displayed() and r.text.strip()
+                         and "Cargando" not in r.text and "Sin información" not in r.text]
+                self.log(f"  Filas visibles (reintento): {len(_vis2)}")
+
+                for row in _vis2:
+                    try:
+                        row_text = row.text
+                        if ubicacion not in row_text:
+                            continue
+                        if "CREADA" not in row_text.upper():
+                            continue
+                        match_ot = re.search(r'(PCKM\d{6,15})', row_text)
+                        if not match_ot:
+                            continue
+                        ot_code = match_ot.group(1)
+                        num_match = re.search(r'PCKM0*(\d+)', ot_code)
+                        ot_num = int(num_match.group(1)) if num_match else 0
+                        match_hora = re.search(
+                            r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)', row_text)
+                        hora_str = match_hora.group(1) if match_hora else "sin fecha"
+                        fecha_dt2 = self._parse_wms_timestamp(match_hora.group(1)) if match_hora else None
+                        ots_candidatas.append({
+                            'codigo': ot_code,
+                            'numero': ot_num,
+                            'hora_str': hora_str,
+                            'fecha_dt': fecha_dt2,
+                            'creada_ok': True,
+                            'ubicacion_ok': True,
+                        })
+                        self.log(f"    ✅ Candidata (reintento): {ot_code} | {hora_str}")
+                    except:
+                        continue
+
+                if ots_candidatas:
+                    elegida_r = self._pick_ot_candidate(
+                        ots_candidatas, tiempo_antes_crear, ubicacion
+                    )
+                    if elegida_r:
+                        ot_number = elegida_r['codigo']
+                        self.log(f"  ✅ OT encontrada en reintento: {ot_number} | {elegida_r['hora_str']}")
+
+                # ── FALLBACK FINAL: buscar por timestamp sin filtro de ubicación ni estado ──
+
+                # Esto sirve cuando la ubicación no se selección en el paso 2
+                if tiempo_antes_crear and ot_number is None:
+                    self.log("  Buscando OT por timestamp en TODAS las filas...")
+                    # Limpiar el buscador para ver todas las OTs
+                    try:
+                        if search_input and search_input.is_displayed():
+                            search_input.click()
+                            search_input.send_keys(Keys.CONTROL + "a")
+                            search_input.send_keys(Keys.DELETE)
+                            time.sleep(1.5)
+                    except:
+                        pass
+
+                    # Releer todas las filas
+                    all_rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                    all_visible = [
+                        r for r in all_rows
+                        if r.is_displayed() and r.text.strip()
+                        and "Cargando" not in r.text
+                        and "Sin información" not in r.text
+                    ]
+                    self.log(f"  Total filas (sin filtro): {len(all_visible)}")
+
+                    candidatas_fb = []
+                    for row in all_visible:
+                        try:
+                            row_text = row.text
+                            m_ot = re.search(r'(PCKM\d{6,15})', row_text)
+                            m_hora = re.search(
+                                r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)', row_text
+                            )
+                            if not m_ot or not m_hora:
+                                continue
+
+                            ot_code = m_ot.group(1)
+                            ts = m_hora.group(1)
+                            fecha_dt = self._parse_wms_timestamp(ts)
+
+                            if fecha_dt and fecha_dt >= tiempo_antes_crear:
+                                num_match = re.search(r'PCKM0*(\d+)', ot_code)
+                                ot_num = int(num_match.group(1)) if num_match else 0
+                                candidatas_fb.append({
+                                    'codigo': ot_code,
+                                    'numero': ot_num,
+                                    'hora_str': ts,
+                                    'fecha_dt': fecha_dt,
+                                    'creada_ok': "CREADA" in row_text.upper(),
+                                    'ubicacion_ok': ubicacion in row_text,
+                                })
+                                self.log(f"    📦 Candidata (sin filtro): {ot_code} | {ts}")
+                        except:
+                            continue
+
+                    if candidatas_fb:
+                        elegida_fb = self._pick_ot_candidate(
+                            candidatas_fb, tiempo_antes_crear, ubicacion
+                        )
+                        if elegida_fb:
+                            ot_number = elegida_fb['codigo']
+                            self.log(f"  ✅ OT encontrada por TIMESTAMP (fallback): {ot_number} | {elegida_fb['hora_str']}")
+                        else:
+                            self.log("  ⚠️ Candidatas detectadas, pero ninguna fue confiable por tiempo.")
+                    else:
+                        self.log("  ⚠️ No se encontró OT por timestamp. Revisa manualmente el WMS.")
+                elif ot_number is None:
+                    self.log("  La OT fue creada pero no pudo identificarse automáticamente.")
+                    self.log("  Revisa manualmente el listado en el WMS.")
+
         except Exception as e:
             self.log(f"  ❌ Error capturando OT: {e}")
-        
+
         return ot_number
     
     def run(self, references):
         self.log(f"\n{'='*50}")
         self.log(f"WMS {self.canal.upper()} AUTOMATION")
         self.log(f"{'='*50}")
+        self.log(f"Operador: {self.operador}")
+        self.log(f"Ubicacion destino aplicada: {self.config['ubicacion']}")
         self.log(f"Órdenes: {len(references)} | Destino: {self.config['ubicacion']}")
         
         self.setup_driver()
@@ -1091,7 +1715,13 @@ class WMSAutomation:
             self.log("Error en login")
             self.driver.quit()
             return
-        
+
+        # Verificar que la sesión quedó activa post-login
+        if not self.is_session_alive():
+            self.log("❌ No se pudo establecer sesión. Verifica credenciales.")
+            self.driver.quit()
+            return
+
         if not self.navigate_to_monitor():
             self.log("Error: La tabla no cargó")
             self.driver.quit()
@@ -1105,6 +1735,7 @@ class WMSAutomation:
         self.log(f"\n{'='*50}")
         self.log("RESUMEN")
         self.log(f"{'='*50}")
+        self.log(f"Operador: {self.operador}")
         if self.ot_generada:
             self.log(f"📋 OT Generada: {self.ot_generada}")
         self.log(f"Tiempo: {elapsed}")
@@ -1147,8 +1778,8 @@ class App(ctk.CTk):
         super().__init__()
         
         self.title("DCIC - Sistema de Despachos")
-        self.geometry("1000x800")
-        self.minsize(900, 700)
+        self.geometry("1400x920")
+        self.minsize(1200, 800)
         
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -1159,12 +1790,159 @@ class App(ctk.CTk):
         self.automation = None
         self.running = False
         self.current_step = 0
+        self.authenticated_operator = None
         
         # Configurar drag and drop
         self.drop_target_register = None
+
+        if not self.authenticate_user():
+            self.after(100, self.destroy)
+            return
         
         self.create_widgets()
         self.apply_canal_theme()
+
+        # Precargar ChromeDriver en background para que esté listo al ejecutar
+        threading.Thread(target=preload_driver, daemon=True).start()
+
+    def authenticate_user(self):
+        """Muestra login grande con selector de usuario y PIN."""
+        max_attempts = 3
+        state = {"success": False, "cancelled": False, "attempts": 0}
+
+        login = ctk.CTkToplevel(self)
+        login.title("Inicio de sesion")
+        login.geometry("560x360")
+        login.resizable(False, False)
+        login.transient(self)
+        login.grab_set()
+
+        self.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - 280
+        y = self.winfo_y() + (self.winfo_height() // 2) - 180
+        login.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        frame = ctk.CTkFrame(login, corner_radius=14)
+        frame.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            frame,
+            text="Acceso Operador",
+            font=ctk.CTkFont(size=30, weight="bold")
+        ).pack(pady=(20, 10))
+
+        ctk.CTkLabel(
+            frame,
+            text="Selecciona usuario y escribe PIN",
+            font=ctk.CTkFont(size=14),
+            text_color="#b0b0b0"
+        ).pack(pady=(0, 14))
+
+        user_var = ctk.StringVar(value=OPERADORES[0])
+        user_menu = ctk.CTkOptionMenu(
+            frame,
+            values=OPERADORES,
+            variable=user_var,
+            width=300,
+            height=42,
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        user_menu.pack(pady=(0, 10))
+
+        pin_entry = ctk.CTkEntry(
+            frame,
+            width=300,
+            height=44,
+            show="*",
+            placeholder_text="PIN",
+            font=ctk.CTkFont(size=18),
+        )
+        pin_entry.pack(pady=(0, 8))
+
+        status_lbl = ctk.CTkLabel(
+            frame,
+            text=f"Intentos: 0/{max_attempts}",
+            font=ctk.CTkFont(size=13),
+            text_color="#d0d0d0",
+        )
+        status_lbl.pack(pady=(0, 12))
+
+        def close_as_cancel():
+            state["cancelled"] = True
+            try:
+                login.grab_release()
+            except:
+                pass
+            login.destroy()
+
+        def try_login(event=None):
+            operador = user_var.get().strip()
+            pin_in = pin_entry.get().strip()
+
+            if pin_in == USER_PINS.get(operador, ""):
+                self.authenticated_operator = operador
+                state["success"] = True
+                try:
+                    login.grab_release()
+                except:
+                    pass
+                login.destroy()
+                return
+
+            state["attempts"] += 1
+            if state["attempts"] >= max_attempts:
+                messagebox.showerror("Bloqueado", "Se supero el numero maximo de intentos.", parent=login)
+                close_as_cancel()
+                return
+
+            status_lbl.configure(
+                text=f"PIN incorrecto. Intentos: {state['attempts']}/{max_attempts}",
+                text_color="#ff6b6b",
+            )
+            pin_entry.delete(0, "end")
+            pin_entry.focus_set()
+
+        btn_row = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_row.pack(pady=(6, 10))
+
+        login_btn = ctk.CTkButton(
+            btn_row,
+            text="Ingresar",
+            width=140,
+            height=42,
+            command=try_login,
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        login_btn.pack(side="left", padx=8)
+
+        cancel_btn = ctk.CTkButton(
+            btn_row,
+            text="Cancelar",
+            width=120,
+            height=42,
+            command=close_as_cancel,
+            fg_color="#666666",
+            hover_color="#555555",
+            font=ctk.CTkFont(size=15),
+        )
+        cancel_btn.pack(side="left", padx=8)
+
+        def apply_user_color(*_):
+            operador = user_var.get().strip()
+            base = USER_COLORS.get(operador, "#2b2b2b")
+            user_menu.configure(fg_color=base, button_color=base, button_hover_color=base)
+            login_btn.configure(fg_color=base, hover_color=base)
+
+        user_var.trace_add("write", apply_user_color)
+        apply_user_color()
+
+        login.protocol("WM_DELETE_WINDOW", close_as_cancel)
+        login.bind("<Return>", try_login)
+        login.bind("<Escape>", lambda e: close_as_cancel())
+        pin_entry.focus_set()
+
+        self.wait_window(login)
+        return state["success"] and not state["cancelled"]
     
     def create_widgets(self):
         # Frame principal con gradiente
@@ -1220,6 +1998,32 @@ class App(ctk.CTk):
             button_hover_color="#AA4400"
         )
         self.canal_menu.pack(side="left", padx=5)
+
+        self.operador_label = ctk.CTkLabel(
+            self.canal_frame,
+            text="Operador:",
+            font=ctk.CTkFont(size=14),
+            text_color="#888888"
+        )
+        self.operador_label.pack(side="left", padx=(10, 5))
+
+        default_operador = self.authenticated_operator or OPERADORES[0]
+        self.operador_var = ctk.StringVar(value=default_operador)
+        self.operador_menu = ctk.CTkOptionMenu(
+            self.canal_frame,
+            values=OPERADORES,
+            variable=self.operador_var,
+            width=120,
+            height=35,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#3a3a3a",
+            button_color="#2b2b2b",
+            button_hover_color="#1f1f1f"
+        )
+        self.operador_menu.pack(side="left", padx=5)
+        # Sesión bloqueada al operador autenticado
+        if self.authenticated_operator:
+            self.operador_menu.configure(state="disabled")
         
         # ===== BARRA DE PROGRESO =====
         self.progress_frame = ctk.CTkFrame(self.main_frame, height=60, fg_color="#252525")
@@ -1616,6 +2420,7 @@ class App(ctk.CTk):
         self.stop_btn.configure(state="normal")
         self.extract_btn.configure(state="disabled")
         self.canal_menu.configure(state="disabled")
+        self.operador_menu.configure(state="disabled")
         self.status_label.configure(text="● Ejecutando...", text_color="#FFE600")
         
         # Ejecutar en thread separado
@@ -1638,7 +2443,12 @@ class App(ctk.CTk):
                 elif "[4/5]" in msg or "[5/5]" in msg:
                     self.after(0, lambda: self.update_progress(6))
             
-            self.automation = WMSAutomation(self.canal_actual, log_callback=log_wrapper)
+            operador = (self.authenticated_operator or self.operador_var.get().strip() or "Sin definir")
+            self.automation = WMSAutomation(
+                self.canal_actual,
+                log_callback=log_wrapper,
+                operador=operador
+            )
             self.automation.run(self.references.copy())
         except Exception as e:
             self.log(f"Error: {e}", "error")
@@ -1651,8 +2461,13 @@ class App(ctk.CTk):
         self.stop_btn.configure(state="disabled")
         self.extract_btn.configure(state="normal")
         self.canal_menu.configure(state="normal")
+        if self.authenticated_operator:
+            self.operador_menu.configure(state="disabled")
+        else:
+            self.operador_menu.configure(state="normal")
         self.status_label.configure(text="● Completado", text_color="#28a745")
         self.update_progress(6)
+        self.append_ot_audit_row()
         
         # Traer ventana al frente
         self.lift()
@@ -1670,6 +2485,51 @@ class App(ctk.CTk):
         # Mostrar mensaje popup
         messagebox.showinfo("✅ Completado", f"Automatización de {self.canal_actual} finalizada.\\n\\nRevisa el log para ver el resumen.")
     
+    def append_ot_audit_row(self):
+        """Guarda trazabilidad local de OT por operador."""
+        try:
+            if not self.automation:
+                return
+
+            ot_code = (self.automation.ot_generada or "").strip()
+            if not ot_code:
+                self.log("No se registro OT en historial (no se capturo OT automatica).", "warning")
+                return
+
+            row = {
+                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "operador": self.authenticated_operator or self.operador_var.get().strip() or "Sin definir",
+                "canal": self.canal_actual,
+                "ot": ot_code,
+                "referencias": len(self.references),
+                "procesadas": len(self.automation.orders_selected),
+                "no_encontradas": len(self.automation.orders_not_found),
+                "skus_sin_stock": len(self.automation.skus_sin_stock),
+            }
+
+            file_exists = os.path.exists(OT_AUDIT_CSV)
+            with open(OT_AUDIT_CSV, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "fecha",
+                        "operador",
+                        "canal",
+                        "ot",
+                        "referencias",
+                        "procesadas",
+                        "no_encontradas",
+                        "skus_sin_stock",
+                    ],
+                )
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
+
+            self.log(f"Historial OT actualizado: {ot_code} | {row['operador']}", "success")
+        except Exception as e:
+            self.log(f"Error guardando historial OT: {e}", "error")
+
     def stop_automation(self):
         if self.automation:
             self.automation.stop()
