@@ -129,6 +129,7 @@ CANALES = {
 
 OPERADORES = ["Rafa", "Alejo", "Nicolas", "Tomas"]
 OT_AUDIT_CSV = "historial_ots.csv"
+GIT_UPDATE_STATUS_FILE = "git_update_status.txt"
 USER_PINS = {
     "Rafa": "9115",
     "Alejo": "1609",
@@ -1801,6 +1802,7 @@ class App(ctk.CTk):
         
         self.create_widgets()
         self.apply_canal_theme()
+        self.show_git_update_status()
 
         # Precargar ChromeDriver en background para que esté listo al ejecutar
         threading.Thread(target=preload_driver, daemon=True).start()
@@ -1943,6 +1945,35 @@ class App(ctk.CTk):
 
         self.wait_window(login)
         return state["success"] and not state["cancelled"]
+
+    def show_git_update_status(self):
+        """Muestra en log el resultado de auto-actualizacion git (si existe)."""
+        try:
+            status_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), GIT_UPDATE_STATUS_FILE)
+            if not os.path.exists(status_path):
+                return
+
+            with open(status_path, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read().strip()
+
+            low = txt.lower()
+            if "already up to date" in low or "already up-to-date" in low:
+                self.log("Git: sin actualizaciones (ya estaba al dia).", "info")
+            elif "fast-forward" in low or "updating " in low:
+                self.log("Git: actualizacion descargada correctamente.", "success")
+            elif "no_git_repo" in low:
+                self.log("Git: carpeta sin repositorio .git (sin auto-actualizacion).", "warning")
+            elif "fatal:" in low or "error" in low:
+                self.log("Git: no se pudo actualizar automaticamente.", "warning")
+            else:
+                self.log("Git: verificacion de actualizaciones completada.", "info")
+
+            try:
+                os.remove(status_path)
+            except:
+                pass
+        except Exception as e:
+            self.log(f"Git: error leyendo estado de actualizacion ({e})", "warning")
     
     def create_widgets(self):
         # Frame principal con gradiente
