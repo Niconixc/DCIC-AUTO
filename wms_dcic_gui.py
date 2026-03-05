@@ -1277,12 +1277,49 @@ class WMSAutomation:
 
             # Navegar al listado de Órdenes de Trabajo
             ot_url = "https://checkweb-prd-checkwms.azurewebsites.net/OrdenTrabajo/index"
-            self.driver.get(ot_url)
+            en_pagina_ot = False
+            for intento_nav in range(1, 4):
+                try:
+                    self.dismiss_alerts()
+                    self.driver.get(ot_url)
+                except:
+                    pass
+
+                deadline_nav = time.time() + 8
+                while time.time() < deadline_nav:
+                    try:
+                        cur = (self.driver.current_url or "").lower()
+                        body_txt = (self.driver.find_element(By.TAG_NAME, "body").text or "").lower()
+                        if ("/ordentrabajo/index" in cur) or ("listado de órdenes de trabajo" in body_txt) or ("listado de ordenes de trabajo" in body_txt):
+                            en_pagina_ot = True
+                            break
+                    except:
+                        pass
+                    time.sleep(0.4)
+
+                if en_pagina_ot:
+                    break
+
+                self.log(f"  (No se pudo abrir Ordenes de Trabajo en intento {intento_nav}/3, reintentando...)")
+                try:
+                    self.driver.execute_script("window.location.href = arguments[0];", ot_url)
+                except:
+                    pass
+                time.sleep(0.8)
+
+            if not en_pagina_ot:
+                self.log("  ⚠️ No se logró navegar a Ordenes de Trabajo. Revisa sesión/conectividad.")
+                return None
+            self.log("  Navegación a Ordenes de Trabajo OK.")
 
             # ── Esperar que la tabla cargue con filas reales (máx 20s) ──
             deadline = time.time() + 20
             while time.time() < deadline:
                 try:
+                    cur = (self.driver.current_url or "").lower()
+                    if "/ordentrabajo/index" not in cur:
+                        time.sleep(0.3)
+                        continue
                     rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
                     visible = [r for r in rows if r.is_displayed() and r.text.strip()
                                and "Cargando" not in r.text
