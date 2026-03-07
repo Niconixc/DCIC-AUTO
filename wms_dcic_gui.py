@@ -132,7 +132,7 @@ OT_AUDIT_CSV = "historial_ots.csv"
 GIT_UPDATE_STATUS_FILE = "git_update_status.txt"
 USER_PINS = {
     "Rafa": "9115",
-    "Alejo": "1609",
+    "Alejo": "2026",
     "Nicolas": "6020",
     "Tomas": "1234",
 }
@@ -769,25 +769,82 @@ class WMSAutomation:
             self.log(f"  Error verificando stock: {e}")
             return False
     
-    def mark_picking_consolidado(self):
+    def is_picking_consolidado_checked(self):
+        """Verifica si el checkbox 'Picking consolidado' está realmente marcado."""
+        try:
+            result = self.driver.execute_script("""
+                const all = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+                for (const cb of all) {
+                    const txt = (((cb.closest('label') && cb.closest('label').innerText) || '') + ' ' +
+                                ((cb.parentElement && cb.parentElement.innerText) || '')).toLowerCase();
+                    if (txt.includes('picking') && txt.includes('consolidado')) {
+                        return !!cb.checked;
+                    }
+                }
+                return null;
+            """)
+            if result is not None:
+                return bool(result)
+        except:
+            pass
+
+        # Fallback por Selenium
         try:
             checkboxes = self.driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
             for cb in checkboxes:
                 try:
-                    parent = cb.find_element(By.XPATH, "./..")
-                    if "picking" in parent.text.lower() and "consolidado" in parent.text.lower():
-                        if not cb.is_selected():
-                            self.js_click(cb)
-                        return True
+                    parent_text = (cb.find_element(By.XPATH, "./..").text or "").lower()
+                    if "picking" in parent_text and "consolidado" in parent_text:
+                        return cb.is_selected()
                 except:
                     continue
-            
-            visible_cbs = [cb for cb in checkboxes if cb.is_displayed()]
-            if len(visible_cbs) >= 3 and not visible_cbs[2].is_selected():
-                self.js_click(visible_cbs[2])
-                return True
         except:
             pass
+
+        return False
+
+    def mark_picking_consolidado(self):
+        """Intenta marcar 'Picking consolidado' y confirma el estado final."""
+        for intento in range(1, 4):
+            try:
+                if self.is_picking_consolidado_checked():
+                    self.log("  Picking consolidado confirmado.")
+                    return True
+
+                checkboxes = self.driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+                marcado = False
+                for cb in checkboxes:
+                    try:
+                        parent = cb.find_element(By.XPATH, "./..")
+                        if "picking" in parent.text.lower() and "consolidado" in parent.text.lower():
+                            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", cb)
+                            time.sleep(0.2)
+                            if not cb.is_selected():
+                                self.js_click(cb)
+                            marcado = True
+                            break
+                    except:
+                        continue
+
+                if not marcado:
+                    visible_cbs = [cb for cb in checkboxes if cb.is_displayed()]
+                    if len(visible_cbs) >= 3:
+                        self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", visible_cbs[2])
+                        time.sleep(0.2)
+                        if not visible_cbs[2].is_selected():
+                            self.js_click(visible_cbs[2])
+
+                time.sleep(0.5)
+                if self.is_picking_consolidado_checked():
+                    self.log("  Picking consolidado marcado OK.")
+                    return True
+            except:
+                pass
+
+            self.log(f"  (Reintento {intento}/3 marcando 'Picking consolidado')")
+            time.sleep(0.4)
+
+        self.log("  ❌ No se pudo confirmar 'Picking consolidado' marcado.")
         return False
     
     def click_crear_ot(self):
@@ -1019,7 +1076,9 @@ class WMSAutomation:
         
         # PASO 5
         self.log("[5/5] Creando OT...")
-        self.mark_picking_consolidado()
+        if not self.mark_picking_consolidado():
+            self.log("  ❌ Abortado: 'Picking consolidado' es obligatorio para crear OT.")
+            return False
         time.sleep(DELAY_STEP)
         
         # Guardar la hora ANTES de crear la OT (para identificarla luego por timestamp)
