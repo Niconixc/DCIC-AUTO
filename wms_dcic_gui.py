@@ -127,7 +127,7 @@ CANALES = {
     }
 }
 
-OPERADORES = ["Rafa", "Alejo", "Nicolas", "Tomas"]
+OPERADORES = ["Rafa", "Alejo", "Nicolas", "Tomas", "Contanza"]
 OT_AUDIT_CSV = "historial_ots.csv"
 GIT_UPDATE_STATUS_FILE = "git_update_status.txt"
 USER_PINS = {
@@ -135,12 +135,14 @@ USER_PINS = {
     "Alejo": "2026",
     "Nicolas": "6020",
     "Tomas": "1234",
+    "Contanza": "0000",
 }
 USER_COLORS = {
     "Rafa": "#111111",      # Negro
     "Alejo": "#ff69b4",     # Rosado
     "Nicolas": "#1e90ff",   # Azul
     "Tomas": "#ff3b30",     # Rojo
+    "Contanza": "#ffffff",  # Blanco
 }
 OPERADOR_UBICACION_MAP = {
     "Nicolas": "ZDESP-01-01",
@@ -2028,8 +2030,14 @@ class App(ctk.CTk):
         def apply_user_color(*_):
             operador = user_var.get().strip()
             base = USER_COLORS.get(operador, "#2b2b2b")
-            user_menu.configure(fg_color=base, button_color=base, button_hover_color=base)
-            login_btn.configure(fg_color=base, hover_color=base)
+            text_color = "#111111" if base.lower() == "#ffffff" else "#ffffff"
+            user_menu.configure(
+                fg_color=base,
+                button_color=base,
+                button_hover_color=base,
+                text_color=text_color,
+            )
+            login_btn.configure(fg_color=base, hover_color=base, text_color=text_color)
 
         user_var.trace_add("write", apply_user_color)
         apply_user_color()
