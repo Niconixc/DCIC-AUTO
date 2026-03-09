@@ -776,18 +776,33 @@ class WMSAutomation:
         """Verifica si el checkbox 'Picking consolidado' está realmente marcado."""
         try:
             result = self.driver.execute_script("""
-                const all = Array.from(document.querySelectorAll('input[type="checkbox"]'));
-                for (const cb of all) {
-                    const txt = (((cb.closest('label') && cb.closest('label').innerText) || '') + ' ' +
-                                ((cb.parentElement && cb.parentElement.innerText) || '')).toLowerCase();
-                    if (txt.includes('picking') && txt.includes('consolidado')) {
-                        return !!cb.checked;
+                function ctxText(cb) {
+                    let n = cb;
+                    for (let i = 0; i < 4 && n; i++) {
+                        n = n.parentElement;
+                        if (!n) break;
+                        const t = (n.innerText || '').toLowerCase();
+                        // Tomar el bloque de la fila/opcion, no el contenedor completo
+                        if (t.includes('picking') && t.includes('consolidado')
+                            && !t.includes('reserva inventario')
+                            && !t.includes('separa ola')) {
+                            return t;
+                        }
                     }
+                    return '';
                 }
-                return null;
+
+                const all = Array.from(document.querySelectorAll("input[type='checkbox']"));
+                for (const cb of all) {
+                    const t = ctxText(cb);
+                    if (!t) continue;
+                    const p = cb.parentElement;
+                    const cls = (((p && p.className) || '') + ' ' + ((p && p.parentElement && p.parentElement.className) || '')).toLowerCase();
+                    return !!cb.checked || cls.includes('checked');
+                }
+                return false;
             """)
-            if result is not None:
-                return bool(result)
+            return bool(result)
         except:
             pass
 
@@ -796,8 +811,10 @@ class WMSAutomation:
             checkboxes = self.driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
             for cb in checkboxes:
                 try:
-                    parent_text = (cb.find_element(By.XPATH, "./..").text or "").lower()
-                    if "picking" in parent_text and "consolidado" in parent_text:
+                    parent_text = (cb.find_element(By.XPATH, "./..").text or "").lower().strip()
+                    if ("picking" in parent_text and "consolidado" in parent_text
+                        and "reserva inventario" not in parent_text
+                        and "separa ola" not in parent_text):
                         return cb.is_selected()
                 except:
                     continue
@@ -808,7 +825,7 @@ class WMSAutomation:
 
     def mark_picking_consolidado(self):
         """Intenta marcar 'Picking consolidado' y confirma el estado final."""
-        for intento in range(1, 4):
+        for intento in range(1, 6):
             try:
                 if self.is_picking_consolidado_checked():
                     self.log("  Picking consolidado confirmado.")
@@ -824,6 +841,12 @@ class WMSAutomation:
                             time.sleep(0.2)
                             if not cb.is_selected():
                                 self.js_click(cb)
+                                time.sleep(0.2)
+                                # Click adicional sobre el contenedor visual (iCheck/switch custom)
+                                try:
+                                    self.driver.execute_script("if(arguments[0].parentElement){arguments[0].parentElement.click();}", cb)
+                                except:
+                                    pass
                             marcado = True
                             break
                     except:
@@ -844,7 +867,7 @@ class WMSAutomation:
             except:
                 pass
 
-            self.log(f"  (Reintento {intento}/3 marcando 'Picking consolidado')")
+            self.log(f"  (Reintento {intento}/5 marcando 'Picking consolidado')")
             time.sleep(0.4)
 
         self.log("  ❌ No se pudo confirmar 'Picking consolidado' marcado.")
@@ -1088,8 +1111,19 @@ class WMSAutomation:
         tiempo_antes_crear = datetime.now()
         self.log(f"  Hora de creación registrada: {tiempo_antes_crear.strftime('%Y-%m-%dT%H:%M:%S')}")
         
+        if not self.is_picking_consolidado_checked():
+            self.log("  ❌ Abortado: 'Picking consolidado' no está marcado antes de Crear OT.")
+            return False
+
         self.click_crear_ot()
         time.sleep(1.5)
+
+        # Verificación defensiva adicional antes de confirmar el modal.
+        if not self.is_picking_consolidado_checked():
+            self.log("  ❌ Abortado: 'Picking consolidado' se desmarcó al crear OT.")
+            self.dismiss_alerts()
+            return False
+
         self.confirm_modal()
         self.dismiss_alerts()  # Limpiar cualquier popup/alert del modal
 
