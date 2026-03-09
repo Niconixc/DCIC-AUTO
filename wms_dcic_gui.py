@@ -127,7 +127,7 @@ CANALES = {
     }
 }
 
-OPERADORES = ["Rafa", "Alejo", "Nicolas", "Tomas", "Contanza"]
+OPERADORES = ["Rafa", "Alejo", "Nicolas", "Tomas", "Constanza"]
 OT_AUDIT_CSV = "historial_ots.csv"
 GIT_UPDATE_STATUS_FILE = "git_update_status.txt"
 USER_PINS = {
@@ -135,21 +135,21 @@ USER_PINS = {
     "Alejo": "2026",
     "Nicolas": "6020",
     "Tomas": "1234",
-    "Contanza": "1234",
+    "Constanza": "1234",
 }
 USER_COLORS = {
     "Rafa": "#111111",      # Negro
     "Alejo": "#ff69b4",     # Rosado
     "Nicolas": "#1e90ff",   # Azul
     "Tomas": "#ff3b30",     # Rojo
-    "Contanza": "#ffffff",  # Blanco
+    "Constanza": "#ffffff",  # Blanco
 }
 OPERADOR_UBICACION_MAP = {
     "Nicolas": "ZDESP-01-01",
     "Alejo": "ZDESP-02-02",
     "Rafa": "ZDESP-03-03",
     "Tomas": "ZDESP-BULKYMELI-01",
-    "Contanza": "ZDESP-PARIS-01",
+    "Constanza": "ZDESP-PARIS-01",
 }
 
 WMS_URL = "https://checkweb-prd-checkwms.azurewebsites.net/"
