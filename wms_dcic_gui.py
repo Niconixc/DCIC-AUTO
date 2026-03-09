@@ -2098,14 +2098,21 @@ class App(ctk.CTk):
             low = txt.lower()
             if "already up to date" in low or "already up-to-date" in low:
                 self.log("Git: sin actualizaciones (ya estaba al dia).", "info")
-            elif "fast-forward" in low or "updating " in low:
+            elif ("fast-forward" in low or "updating " in low
+                  or "successfully rebased" in low
+                  or "files changed" in low):
                 self.log("Git: actualizacion descargada correctamente.", "success")
             elif "no_git_repo" in low:
                 self.log("Git: carpeta sin repositorio .git (sin auto-actualizacion).", "warning")
-            elif "fatal:" in low or "error" in low:
-                self.log("Git: no se pudo actualizar automaticamente.", "warning")
+            elif "git_not_found" in low:
+                self.log("Git: no se encontro 'git' en el equipo. Instala Git para auto-actualizar.", "warning")
+            elif "pull_failed" in low or "fatal:" in low or "error" in low or "not possible to fast-forward" in low:
+                # Mostrar una pista concreta del motivo real.
+                first_line = txt.splitlines()[0] if txt.splitlines() else "sin detalle"
+                self.log(f"Git: fallo la auto-actualizacion ({first_line}).", "warning")
             else:
-                self.log("Git: verificacion de actualizaciones completada.", "info")
+                first_line = txt.splitlines()[0] if txt.splitlines() else "sin detalle"
+                self.log(f"Git: verificacion completada ({first_line}).", "info")
 
             try:
                 os.remove(status_path)
