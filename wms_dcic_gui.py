@@ -135,7 +135,7 @@ USER_PINS = {
     "Alejo": "2026",
     "Nicolas": "6020",
     "Tomas": "1234",
-    "Contanza": "0000",
+    "Contanza": "1234",
 }
 USER_COLORS = {
     "Rafa": "#111111",      # Negro
@@ -149,6 +149,7 @@ OPERADOR_UBICACION_MAP = {
     "Alejo": "ZDESP-02-02",
     "Rafa": "ZDESP-03-03",
     "Tomas": "ZDESP-BULKYMELI-01",
+    "Contanza": "ZDESP-PARIS-01",
 }
 
 WMS_URL = "https://checkweb-prd-checkwms.azurewebsites.net/"
