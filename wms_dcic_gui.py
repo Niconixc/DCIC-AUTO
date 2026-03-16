@@ -104,8 +104,8 @@ CANALES = {
         "keywords": ["walmart", "wmt"]
     },
     "Paris": {
-        "patron": r'^307\d{7}$|^308\d{7}$',
-        "patron_busqueda": r'\b(30[78]\d{7})\b',
+        "patron": r'^30[789]\d{7}$',
+        "patron_busqueda": r'\b(30[789]\d{7})\b',
         "ubicacion": "ZDESP-PARIS-01",
         "color": "#001f5b",  # Azul marino
         "keywords": ["paris", "cencosud", "mkc", "marketcenter"]
@@ -184,6 +184,7 @@ def preload_driver():
 
 def detect_canal_from_pdf(pdf_path):
     """Detecta automáticamente el canal basado en el contenido del PDF."""
+    paris_ref_pattern = r'\b30[789]\d{7}\b'
     try:
         with pdfplumber.open(pdf_path) as pdf:
             # Leer primera página
@@ -210,8 +211,8 @@ def detect_canal_from_pdf(pdf_path):
             if re.search(r'\b2000\d{12,14}\b', text):
                 return "Mercadolibre"
             
-            # Paris: 307 o 308 + 7 dígitos
-            if re.search(r'\b30[78]\d{7}\b', text):
+            # Paris: 307, 308 o 309 + 7 dígitos
+            if re.search(paris_ref_pattern, text):
                 return "Paris"
             
             # Falabella: 32 + 8 dígitos
@@ -223,8 +224,11 @@ def detect_canal_from_pdf(pdf_path):
                 return "Walmart"
             
             # PASO 2: Buscar por KEYWORDS específicos
-            # Paginas / Starken
-            if any(kw in text_lower for kw in ["starken", "homeclaf", "vincenzi", "glowup", "miglu", "acqui", "paginas"]):
+            # Paginas: keywords propias (evitar clasificar por "starken" solamente)
+            paginas_keywords = ["homeclaf", "vincenzi", "glowup", "miglu", "acqui", "paginas"]
+            if any(kw in text_lower for kw in paginas_keywords):
+                return "Paginas"
+            if "starken" in text_lower and re.search(r'\b[A-Za-z]+\.cl-\d+\b', text):
                 return "Paginas"
             
             # Ripley
@@ -249,8 +253,8 @@ def detect_canal_from_pdf(pdf_path):
             
             # Si tiene MARKETCENTER pero no detectó antes, verificar referencias
             if "marketcenter" in text_lower:
-                # Verificar si tiene referencias de Paris (307/308)
-                if re.search(r'\b30[78]\d{7}\b', text):
+                # Verificar si tiene referencias de Paris (307/308/309)
+                if re.search(paris_ref_pattern, text):
                     return "Paris"
                 # Si no, asumir Mercadolibre
                 return "Mercadolibre"
