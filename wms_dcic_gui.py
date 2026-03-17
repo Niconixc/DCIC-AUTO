@@ -25,6 +25,24 @@ from queue import Queue
 
 # ============== AUTO-ACTUALIZACION GIT ==============
 
+def _find_git():
+    """Localiza el ejecutable git en el sistema (funciona aunque no este en PATH)."""
+    import shutil
+    git = shutil.which("git")
+    if git:
+        return git
+    # Rutas comunes de Git for Windows
+    candidates = [
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+        r"C:\Program Files (x86)\Git\cmd\git.exe",
+        r"C:\Program Files (x86)\Git\bin\git.exe",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
 def auto_update():
     """Hace git pull al arrancar y reinicia si hay cambios nuevos."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,15 +52,15 @@ def auto_update():
         if not os.path.isdir(os.path.join(script_dir, ".git")):
             open(status_file, "w", encoding="utf-8").write("NO_GIT_REPO\n")
             return
-        ver = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10)
-        if ver.returncode != 0:
+        git_exe = _find_git()
+        if not git_exe:
             open(status_file, "w", encoding="utf-8").write("GIT_NOT_FOUND\n")
             return
-        subprocess.run(["git", "fetch", "--quiet"], capture_output=True, text=True, timeout=30, cwd=script_dir)
-        behind = subprocess.run(["git", "rev-list", "HEAD..@{u}", "--count"],
+        subprocess.run([git_exe, "fetch", "--quiet"], capture_output=True, text=True, timeout=30, cwd=script_dir)
+        behind = subprocess.run([git_exe, "rev-list", "HEAD..@{u}", "--count"],
                                 capture_output=True, text=True, timeout=10, cwd=script_dir)
         commits_behind = behind.stdout.strip()
-        pull = subprocess.run(["git", "pull", "--rebase", "--autostash"],
+        pull = subprocess.run([git_exe, "pull", "--rebase", "--autostash"],
                               capture_output=True, text=True, timeout=60, cwd=script_dir)
         output = pull.stdout.strip()
         if pull.stderr.strip():
