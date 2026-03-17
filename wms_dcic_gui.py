@@ -19,8 +19,49 @@ import time
 import threading
 import winsound
 import csv
+import subprocess
 from datetime import datetime, timedelta
 from queue import Queue
+
+# ============== AUTO-ACTUALIZACION GIT ==============
+
+def auto_update():
+    """Hace git pull al arrancar y reinicia si hay cambios nuevos."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(script_dir)
+    status_file = os.path.join(script_dir, "git_update_status.txt")
+    try:
+        if not os.path.isdir(os.path.join(script_dir, ".git")):
+            open(status_file, "w", encoding="utf-8").write("NO_GIT_REPO\n")
+            return
+        ver = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10)
+        if ver.returncode != 0:
+            open(status_file, "w", encoding="utf-8").write("GIT_NOT_FOUND\n")
+            return
+        subprocess.run(["git", "fetch", "--quiet"], capture_output=True, text=True, timeout=30, cwd=script_dir)
+        behind = subprocess.run(["git", "rev-list", "HEAD..@{u}", "--count"],
+                                capture_output=True, text=True, timeout=10, cwd=script_dir)
+        commits_behind = behind.stdout.strip()
+        pull = subprocess.run(["git", "pull", "--rebase", "--autostash"],
+                              capture_output=True, text=True, timeout=60, cwd=script_dir)
+        output = pull.stdout.strip()
+        if pull.stderr.strip():
+            output += "\n" + pull.stderr.strip()
+        with open(status_file, "w", encoding="utf-8") as _f:
+            prefix = "PULL_FAILED\n" if pull.returncode != 0 else ""
+            _f.write(prefix + output + "\n")
+        if (commits_behind.isdigit() and int(commits_behind) > 0
+                and pull.returncode == 0
+                and "Already up to date" not in pull.stdout):
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as _e:
+        try:
+            open(status_file, "w", encoding="utf-8").write(f"UPDATE_ERROR: {_e}\n")
+        except Exception:
+            pass
+
+auto_update()
+
 
 # Instalar dependencias si no existen
 def install_deps():
