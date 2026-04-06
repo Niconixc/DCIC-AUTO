@@ -186,7 +186,7 @@ CANALES = {
     }
 }
 
-OPERADORES = ["Rafa", "Alejo", "Nicolas", "Tomas", "Constanza"]
+OPERADORES = ["Rafa", "Alejo", "Nicolas", "Tomas", "Pedro"]
 OT_AUDIT_CSV = "historial_ots.csv"
 GIT_UPDATE_STATUS_FILE = "git_update_status.txt"
 USER_PINS = {
@@ -194,21 +194,21 @@ USER_PINS = {
     "Alejo": "2026",
     "Nicolas": "6020",
     "Tomas": "1234",
-    "Constanza": "1234",
+    "Pedro": "1234",
 }
 USER_COLORS = {
     "Rafa": "#111111",      # Negro
     "Alejo": "#ff69b4",     # Rosado
     "Nicolas": "#1e90ff",   # Azul
     "Tomas": "#ff3b30",     # Rojo
-    "Constanza": "#ffffff",  # Blanco
+    "Pedro": "#ffffff",  # Blanco
 }
 OPERADOR_UBICACION_MAP = {
     "Nicolas": "ZDESP-01-01",
     "Alejo": "ZDESP-02-02",
     "Rafa": "ZDESP-03-03",
     "Tomas": "ZDESP-BULKYMELI-01",
-    "Constanza": "ZDESP-PARIS-01",
+    "Pedro": "ZDESP-PARIS-01",
 }
 
 WMS_URL = "https://checkweb-prd-checkwms.azurewebsites.net/"
@@ -1391,10 +1391,18 @@ class WMSAutomation:
             if fecha_dt is None:
                 continue
             delta = fecha_dt - tiempo_antes_crear
-            if delta < -tolerance or delta > max_delay:
+            delta_sec = delta.total_seconds()
+            
+            # Ajuste automático del desfase de zona horaria (servidor vs equipo local)
+            desfase_horas = round(delta_sec / 3600)
+            delta_ajustado = delta_sec - (desfase_horas * 3600)
+            if abs(delta_ajustado) <= max(OT_CAPTURE_MAX_DELAY_SEC, 300):
+                delta_sec = delta_ajustado
+
+            if delta_sec < -OT_CAPTURE_TIME_TOLERANCE_SEC or delta_sec > OT_CAPTURE_MAX_DELAY_SEC:
                 continue
             c_copy = dict(c)
-            c_copy['_delta_seconds'] = delta.total_seconds()
+            c_copy['_delta_seconds'] = delta_sec
             recientes.append(c_copy)
 
         if not recientes:
@@ -1582,6 +1590,24 @@ class WMSAutomation:
                         _last_count = len(_filas_ok)
                         if _last_count > 0:
                             return _last_count
+                            
+                        # Detección temprana: Salir rápido si DataTables confirma 0 resultados en la UI
+                        try:
+                            _proc = self.driver.find_elements(By.CSS_SELECTOR, ".dataTables_processing")
+                            _is_processing = any(p.is_displayed() for p in _proc)
+                            
+                            if not _is_processing:
+                                _info = self.driver.find_elements(By.CSS_SELECTOR, ".dataTables_info")
+                                if _info:
+                                    _txt = _info[0].text.lower()
+                                    if any(x in _txt for x in ["0 to 0", "0 of 0", "0 a 0", "0 registros"]):
+                                        return 0
+                                
+                                _empty = self.driver.find_elements(By.CSS_SELECTOR, ".dataTables_empty")
+                                if _empty and any(e.is_displayed() for e in _empty):
+                                    return 0
+                        except:
+                            pass
                     except:
                         pass
                     time.sleep(0.5)
@@ -1593,12 +1619,13 @@ class WMSAutomation:
 
                     if tiempo_antes_crear:
                         filtros_fecha = []
-                        for dt in [tiempo_antes_crear,
-                                   tiempo_antes_crear + timedelta(minutes=1),
-                                   tiempo_antes_crear - timedelta(minutes=1)]:
-                            ftxt = dt.strftime("%Y-%m-%dT%H:%M")
-                            if ftxt not in filtros_fecha:
-                                filtros_fecha.append(ftxt)
+                        # Considerar posibles cambios de zona horaria (ej: cambio de hora en Chile +/- 1, 2 hrs)
+                        for offset_h in [0, 1, -1, 2, -2]:
+                            for offset_m in [0, 1, -1]:
+                                dt = tiempo_antes_crear + timedelta(hours=offset_h, minutes=offset_m)
+                                ftxt = dt.strftime("%Y-%m-%dT%H:%M")
+                                if ftxt not in filtros_fecha:
+                                    filtros_fecha.append(ftxt)
 
                         for intento in range(3):
                             if intento > 0:
